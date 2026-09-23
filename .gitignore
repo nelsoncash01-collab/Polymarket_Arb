@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+recordings/
+*.local.json
+out*.json
+out*.csv
