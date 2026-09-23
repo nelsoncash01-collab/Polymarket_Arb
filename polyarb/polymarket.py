@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from polyarb.config import Config
-from polyarb.http import Fetcher
+from polyarb.http import ClientError, Fetcher
 from polyarb.kalshi import parse_time
 from polyarb.matching import outcome_key
 from polyarb.models import Event, Level, Quote, Side
@@ -63,8 +63,14 @@ def _tradeable(m: dict) -> bool:
     )
 
 
-def _fee_override(m: dict) -> float | None:
-    return 0.0 if m.get("feesEnabled") is False else None
+def _fee_schedule(m: dict) -> tuple[float | None, float | None]:
+    """(rate, exponent) from Gamma's per-market feeSchedule; None = use config."""
+    if m.get("feesEnabled") is False:
+        return 0.0, None
+    sched = m.get("feeSchedule")
+    if isinstance(sched, dict) and sched.get("rate") is not None:
+        return float(sched["rate"]), (float(sched["exponent"]) if sched.get("exponent") is not None else None)
+    return None, None
 
 
 def binary_quotes(m: dict) -> tuple[Side, Side]:
@@ -83,6 +89,7 @@ def binary_quotes(m: dict) -> tuple[Side, Side]:
 
 
 def _quote(m: dict, label: str, yes: Side, no: Side, url: str) -> Quote:
+    rate, exponent = _fee_schedule(m)
     return Quote(
         venue="polymarket",
         market_id=m.get("conditionId") or str(m.get("id", "")),
@@ -94,12 +101,15 @@ def _quote(m: dict, label: str, yes: Side, no: Side, url: str) -> Quote:
         liquidity_usd=_num(m, "liquidityNum", "liquidity"),
         close_time=parse_time(m.get("endDate")),
         url=url,
-        fee_rate=_fee_override(m),
+        fee_rate=rate,
+        fee_exponent=exponent,
     )
 
 
 def event_date(ev: dict, m: dict | None = None) -> datetime | None:
-    s = _SLUG_DATE.search(ev.get("slug") or "")
+    # eventDate is the local game date (matches Kalshi tickers); the slug's
+    # date can be the UTC date, a day later for night games.
+    s = _SLUG_DATE.search(ev.get("eventDate") or "") or _SLUG_DATE.search(ev.get("slug") or "")
     if s:
         return datetime(int(s.group(1)), int(s.group(2)), int(s.group(3)), tzinfo=timezone.utc)
     for value in ((m or {}).get("gameStartTime"), ev.get("startTime"), ev.get("endDate")):
@@ -186,12 +196,19 @@ class PolymarketClient:
         self.fetch = fetcher
 
     def _events(self, tag: str) -> list[dict]:
+        # Most-traded first: Gamma rejects offsets past ~2000 (HTTP 422), so if
+        # a tag is truncated, what gets dropped is the illiquid tail.
         out, limit = [], 100
         for page in range(self.cfg.max_pages):
-            data = self.fetch.get_json(
-                f"{self.cfg.gamma_base}/events",
-                {"tag_slug": tag, "active": "true", "closed": "false", "limit": limit, "offset": page * limit},
-            )
+            params = {"tag_slug": tag, "active": "true", "closed": "false", "limit": limit,
+                      "offset": page * limit, "order": "volume24hr", "ascending": "false"}
+            try:
+                data = self.fetch.get_json(f"{self.cfg.gamma_base}/events", params)
+            except ClientError as exc:
+                if page == 0:
+                    raise
+                log.warning("polymarket %s: stopped paging at offset %d (%s)", tag, page * limit, exc)
+                break
             rows = data if isinstance(data, list) else data.get("events") or data.get("data") or []
             out.extend(rows)
             if len(rows) < limit:

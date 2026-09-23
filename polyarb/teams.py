@@ -217,6 +217,14 @@ def resolve_team(league: str, text: str) -> str | None:
     return f"{league}:{found.pop()}" if len(found) == 1 else None
 
 
+_COLLEGE_WORDS = {"st": "state", "univ": "university", "u": "university"}
+
+
 def fallback_key(league: str, text: str) -> str:
-    """Key for leagues without a table (college): normalized name."""
-    return f"{league}:~{norm(text)}"
+    """Key for leagues without a table (college): normalized name.
+
+    Kalshi writes "New Mexico St." where Polymarket writes "New Mexico State".
+    """
+    words = [_COLLEGE_WORDS.get(w, w) for w in norm(text).split()]
+    words = [w for w in words if w not in ("the", "university")] or words
+    return f"{league}:~{' '.join(words)}"

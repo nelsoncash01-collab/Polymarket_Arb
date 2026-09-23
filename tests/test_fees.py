@@ -17,11 +17,16 @@ def test_kalshi_series_override():
     assert fees.rate_for("KXNFLGAME-26SEP24KCBUF-KC") == 0.07
 
 
-def test_polymarket_fee_default_zero_and_curve():
+def test_polymarket_fee_curves():
     assert PolymarketFees().cost(100, 0.5) == 0
-    f = PolymarketFees(taker_rate=0.25, exponent=1)
-    assert f.cost(100, 0.5) == pytest.approx(100 * 0.5 * 0.25 * 0.25)
-    assert f.cost(100, 0.5, rate=0.0) == 0  # market with fees disabled
+    f = PolymarketFees()
+    # per-market schedule, conservative "pq" shape: 100 * 0.05 * 0.25
+    assert f.cost(100, 0.5, rate=0.05, exponent=1) == pytest.approx(1.25)
+    assert PolymarketFees(formula="p_pq").cost(100, 0.5, rate=0.05, exponent=1) == pytest.approx(0.625)
+    assert f.cost(100, 0.5, rate=0.0) == 0  # fees disabled
+    # "pq" is never below "p_pq"
+    for p in (0.1, 0.5, 0.9):
+        assert f.cost(10, p, 0.04, 1) >= PolymarketFees(formula="p_pq").cost(10, p, 0.04, 1)
 
 
 def test_ceil_cents():

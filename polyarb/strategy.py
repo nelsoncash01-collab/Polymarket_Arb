@@ -113,13 +113,13 @@ class Pricer:
         if quote.venue == "kalshi":
             rate = self.cfg.kalshi_fees.rate_for(quote.market_id)
             return sum(self.cfg.kalshi_fees.cost(q, p, rate) for p, q in fills)
-        return sum(self.cfg.poly_fees.cost(q, p, quote.fee_rate) for p, q in fills)
+        return sum(self.cfg.poly_fees.cost(q, p, quote.fee_rate, quote.fee_exponent) for p, q in fills)
 
     def unit_fee(self, quote: Quote, price: float) -> float:
         """Approximate per-contract fee (no rounding), for screening/marginals."""
         if quote.venue == "kalshi":
             return self.cfg.kalshi_fees.rate_for(quote.market_id) * price * (1 - price)
-        return self.cfg.poly_fees.cost(1, price, quote.fee_rate)
+        return self.cfg.poly_fees.cost(1, price, quote.fee_rate, quote.fee_exponent)
 
 
 def fair_value(k: Quote, p: Quote, cfg: Config) -> tuple[float, float] | None:
@@ -164,7 +164,7 @@ class Evaluator:
     # Cheap top-of-book test: is it worth fetching order books?
     def screen(self, pair: Pair) -> bool:
         k, p, cfg = pair.kalshi, pair.poly, self.cfg
-        if not self._liquid_enough(k, p):
+        if not self._liquid_enough(k, p) or self._diverged(k, p):
             return False
         for p_side, k_side in ((p.yes, k.no), (p.no, k.yes)):
             if p_side.ask and k_side.ask and self._in_band(p_side.ask):
@@ -183,7 +183,7 @@ class Evaluator:
 
     def evaluate(self, match: Match, pair: Pair) -> list[Suggestion]:
         k, p = pair.kalshi, pair.poly
-        if not self._liquid_enough(k, p):
+        if not self._liquid_enough(k, p) or self._diverged(k, p):
             return []
         out = []
         if self.cfg.mode in ("arb", "both"):
@@ -197,6 +197,10 @@ class Evaluator:
     def _liquid_enough(self, k: Quote, p: Quote) -> bool:
         return (k.volume_24h_usd >= self.cfg.min_kalshi_volume_24h_usd
                 and p.volume_24h_usd >= self.cfg.min_poly_volume_24h_usd)
+
+    def _diverged(self, k: Quote, p: Quote) -> bool:
+        km, pm = k.mid(), p.mid()
+        return km is not None and pm is not None and abs(km - pm) > self.cfg.max_mid_divergence
 
     def _in_band(self, price: float) -> bool:
         return self.cfg.min_price <= price <= self.cfg.max_price
@@ -306,6 +310,8 @@ class Evaluator:
         sized = p_side.depth_loaded and k_side.depth_loaded
         days = _days(max((t for t in (k.close_time, p.close_time) if t), default=None), self.now)
         roi = profit / total
+        if days is not None and _apr(roi, days) < self.cfg.min_arb_apr:
+            return None
         ctx = self._context(match, pair, poly_side_name)
         return Suggestion(
             kind="hedged_arb", legs=legs, contracts=n, total_cost=total, total_fees=pfee + kfee,

@@ -57,12 +57,18 @@ class Config:
     min_poly_volume_24h_usd: float = 500.0
     max_kalshi_spread: float = 0.08  # a wide Kalshi book is not a usable reference
     min_match_score: float = 0.85
+    # Mids further apart than this are almost always two different questions
+    # (e.g. "mayor by Oct 1" vs "next mayor"), not free money. Skip them.
+    max_mid_divergence: float = 0.20
     # Manual overrides for election matching: [[kalshi_event_ticker, poly_event_slug], ...]
     force_pairs: list[list[str]] = field(default_factory=list)
     block_pairs: list[list[str]] = field(default_factory=list)
 
     # --- hedged arb (buy both sides across venues) ---
     min_arb_edge: float = 0.01  # net $ per contract after fees
+    # 3% locked for two years is worse than T-bills. Arbs must beat this
+    # annualized; set 0 to disable.
+    min_arb_apr: float = 0.08
 
     # --- directional signal (trade Polymarket only, Kalshi as reference) ---
     min_signal_edge: float = 0.03  # net expected $ per contract after fees

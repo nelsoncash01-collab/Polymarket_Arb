@@ -37,3 +37,29 @@ def test_outcomes():
     assert outcome_similarity("person:vance", "person:jd vance") > 0.9
     assert outcome_similarity("person:jon smith", "person:mary smith") == 0
     assert outcome_similarity("party:DEM", "party:GOP") == 0
+
+
+def test_college_state_suffix_pairs_correctly():
+    from polyarb.matching import match_sports
+    from polyarb.models import Event
+    from polyarb.teams import fallback_key
+
+    k = Event("kalshi", "K", "", "sports", "ncaaf",
+              teams=tuple(sorted([fallback_key("ncaaf", "New Mexico"), fallback_key("ncaaf", "New Mexico St.")])))
+    p = Event("polymarket", "P", "", "sports", "ncaaf",
+              teams=tuple(sorted([fallback_key("ncaaf", "New Mexico State"), fallback_key("ncaaf", "New Mexico")])))
+    # use the keys themselves as stand-in quotes so the pairing is visible
+    k.quotes = {t: t for t in k.teams}
+    p.quotes = {t: t for t in p.teams}
+    [m] = match_sports([k], [p], 0.85)
+    assert [(pair.kalshi, pair.poly) for pair in m.pairs] == [
+        ("ncaaf:~new mexico", "ncaaf:~new mexico"),
+        ("ncaaf:~new mexico state", "ncaaf:~new mexico state"),
+    ]
+    assert m.score == 0.9  # no dates on either side -> 0.9 by design
+
+
+def test_numeric_outcomes_need_exact_match():
+    assert outcome_similarity(outcome_key("At least 30%"), outcome_key("<30%")) == 0
+    assert outcome_similarity(outcome_key("At least 6"), outcome_key("6")) == 0
+    assert outcome_similarity(outcome_key("Ramaswamy, 3+ pts"), outcome_key("Ramaswamy 3-6%")) == 0

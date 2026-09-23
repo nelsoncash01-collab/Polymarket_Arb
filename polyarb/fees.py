@@ -4,12 +4,15 @@ Kalshi (published fee schedule): taker fee per order =
     ceil_to_cent(rate * C * P * (1 - P))
 with rate = 0.07 for most markets (some series differ; override in config).
 
-Polymarket: most markets historically charged no trading fee, but fee-enabled
-markets use a curve of the form
-    fee = C * P * rate * (P * (1 - P)) ** exponent
-Rates differ per market type and change over time, so they are config-driven.
-VERIFY CURRENT RATES before trading real money; fees are the difference
-between an arb and a loss at these margins.
+Polymarket: taker fees are published per market in Gamma's `feeSchedule`
+({"rate": 0.05, "exponent": 1, "takerOnly": true}); as of Sep 2026 sports
+moneylines carry 0.03-0.05 and politics 0.04. Two curve shapes are plausible:
+    "pq":   fee = C * rate * (P * (1 - P)) ** exponent        (default)
+    "p_pq": fee = C * P * rate * (P * (1 - P)) ** exponent
+"pq" is never smaller, so it's the conservative default until confirmed
+against Polymarket's fee docs. Markets without a schedule fall back to
+`taker_rate`. Fees are the difference between an arb and a loss at these
+margins: verify before trading real money.
 """
 
 from __future__ import annotations
@@ -41,11 +44,15 @@ class KalshiFees:
 
 @dataclass
 class PolymarketFees:
-    taker_rate: float = 0.0
+    taker_rate: float = 0.0  # fallback when a market publishes no feeSchedule
     exponent: float = 1.0
+    formula: str = "pq"  # "pq" | "p_pq", see module docstring
 
-    def cost(self, contracts: float, price: float, rate: float | None = None) -> float:
+    def cost(self, contracts: float, price: float, rate: float | None = None,
+             exponent: float | None = None) -> float:
         r = self.taker_rate if rate is None else rate
+        e = self.exponent if exponent is None else exponent
         if contracts <= 0 or r <= 0:
             return 0.0
-        return contracts * price * r * (price * (1 - price)) ** self.exponent
+        fee = contracts * r * (price * (1 - price)) ** e
+        return fee * price if self.formula == "p_pq" else fee

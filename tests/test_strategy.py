@@ -104,3 +104,21 @@ def test_tail_prices_ignored():
     p = quote("polymarket", 0.01, 0.02, 100_000)
     m, pair = match_for(k, p)
     assert all(l.avg_price >= cfg.min_price for s in Evaluator(cfg, NOW).evaluate(m, pair) for l in s.legs)
+
+
+def test_large_divergence_is_treated_as_mismatch():
+    # 40c vs 1c on a "matched" pair: different questions, not an arb
+    k = quote("kalshi", 0.39, 0.41, 100_000)
+    p = quote("polymarket", 0.005, 0.01, 100_000)
+    m, pair = match_for(k, p)
+    ev = Evaluator(Config(min_price=0.0), NOW)
+    assert not ev.screen(pair) and ev.evaluate(m, pair) == []
+
+
+def test_long_dated_arb_rejected_below_min_apr():
+    k = quote("kalshi", 0.38, 0.40, 100_000)
+    p = quote("polymarket", 0.45, 0.46, 100_000)
+    k.close_time = p.close_time = datetime(2028, 11, 7, tzinfo=timezone.utc)  # ~2 years out
+    m, pair = match_for(k, p)
+    assert Evaluator(Config(mode="arb"), NOW).evaluate(m, pair) == []
+    assert Evaluator(Config(mode="arb", min_arb_apr=0), NOW).evaluate(m, pair)

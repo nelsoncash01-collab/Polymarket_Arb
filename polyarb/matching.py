@@ -12,8 +12,10 @@ heuristic; `force_pairs` / `block_pairs` in the config are the escape hatch.
 from __future__ import annotations
 
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 from polyarb.models import Event, Quote
 from polyarb.teams import norm
@@ -85,6 +87,8 @@ def outcome_similarity(a: str, b: str) -> float:
     ta, tb = a[7:].split(), b[7:].split()
     if not ta or not tb:
         return 0.0
+    if any(t.isdigit() for t in ta + tb):
+        return 0.0  # thresholds/brackets ("At least 30%" vs "<30%"): exact only
     if ta[-1] == tb[-1]:  # same surname
         if len(ta) == 1 or len(tb) == 1 or ta[0][0] == tb[0][0]:
             return 0.95
@@ -93,6 +97,7 @@ def outcome_similarity(a: str, b: str) -> float:
     return ratio if ratio >= 0.9 else 0.0
 
 
+@lru_cache(maxsize=None)
 def title_features(title: str) -> tuple[frozenset[str], frozenset[str]]:
     """(discriminating keys, other significant words)."""
     keys: set[str] = set()
@@ -157,11 +162,13 @@ def _team_similarity(a: str, b: str) -> float:
 
 def _pair_teams(k: Event, p: Event) -> tuple[float, list[tuple[str, str]]]:
     (k1, k2), (p1, p2) = k.teams, p.teams
-    straight = min(_team_similarity(k1, p1), _team_similarity(k2, p2))
-    crossed = min(_team_similarity(k1, p2), _team_similarity(k2, p1))
-    if straight >= crossed:
-        return straight, [(k1, p1), (k2, p2)]
-    return crossed, [(k1, p2), (k2, p1)]
+    s = (_team_similarity(k1, p1), _team_similarity(k2, p2))
+    c = (_team_similarity(k1, p2), _team_similarity(k2, p1))
+    # Compare totals, not minimums: "New Mexico"/"New Mexico State" is 0.9
+    # either way round, but only the right pairing contains an exact match.
+    if (sum(s), min(s)) >= (sum(c), min(c)):
+        return min(s), [(k1, p1), (k2, p2)]
+    return min(c), [(k1, p2), (k2, p1)]
 
 
 def match_sports(kalshi: list[Event], poly: list[Event], min_score: float) -> list[Match]:
@@ -212,6 +219,11 @@ def event_similarity(k_title: str, p_title: str) -> float:
     return 0.7 + 0.3 * jaccard
 
 
+def _bucket(title: str) -> frozenset[str]:
+    keys, _ = title_features(title)
+    return frozenset(x for x in keys if not x.startswith("year:"))
+
+
 def _pair_outcomes(k: Event, p: Event) -> list[Pair]:
     if "__binary__" in k.quotes or "__binary__" in p.quotes:
         if len(k.quotes) == 1 and len(p.quotes) == 1:
@@ -230,9 +242,17 @@ def match_politics(kalshi: list[Event], poly: list[Event], min_score: float,
                    force: list[list[str]] | None = None, block: list[list[str]] | None = None) -> list[Match]:
     forced = {(a, b) for a, b in force or []}
     blocked = {(a, b) for a, b in block or []}
+    # event_similarity() requires identical non-year keys, so bucket on them
+    # instead of comparing every Kalshi event against every Polymarket event.
+    index: dict[frozenset[str], list[Event]] = defaultdict(list)
+    for p in poly:
+        index[_bucket(p.title)].append(p)
+    by_id = {p.event_id: p for p in poly}
     candidates = []
     for k in kalshi:
-        for p in poly:
+        pool = list(index.get(_bucket(k.title), []))
+        pool += [by_id[b] for a, b in forced if a == k.event_id and b in by_id]
+        for p in pool:
             if (k.event_id, p.event_id) in blocked:
                 continue
             score = 1.0 if (k.event_id, p.event_id) in forced else event_similarity(k.title, p.title)

@@ -53,7 +53,8 @@ class Quote:
     liquidity_usd: float = 0.0
     close_time: datetime | None = None
     url: str = ""
-    fee_rate: float | None = None  # venue/market-specific override, if known
+    fee_rate: float | None = None  # market-specific taker rate, if the venue publishes one
+    fee_exponent: float | None = None
 
     def mid(self) -> float | None:
         bid, ask = self.yes.bid, self.yes.ask
