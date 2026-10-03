@@ -1,23 +1,26 @@
-"""Commercial bank price-to-book vs. subsequent returns, quarterly since 1996.
+"""Commercial bank price-to-book vs. subsequent returns, quarterly.
 
-Prices/returns come from Yahoo Finance (yfinance). Yahoo only exposes ~5-7
-quarters of balance-sheet history, so book value per share (BVPS) before that
-must be supplied via --bv-csv (columns: ticker,date,bvps), e.g. from 10-Q/10-K
-filings, FDIC call reports aggregated to the holding company, or Compustat.
-BVPS must be on the same split basis as Yahoo's split-adjusted Close.
+Prices/returns come from Yahoo Finance (yfinance). Book value per share comes
+from SEC XBRL companyfacts (~2009 onward): common equity = StockholdersEquity
+minus PreferredStockValue, divided by CommonStockSharesOutstanding, with shares
+restated for later splits so they match Yahoo's split-adjusted Close.
+Optional --bv-csv (ticker,date,bvps) overrides/extends that, e.g. pre-2009.
 
 Regression (pooled panel): forward return over the next h quarters ~ P/B at quarter end.
 
 Usage:
     pip install yfinance pandas numpy matplotlib
-    python bank_pb_vs_returns.py --bv-csv bvps.csv --horizon 4
+    python bank_pb_vs_returns.py --horizon 4
 """
 import argparse
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
+
+SEC_UA = {"User-Agent": "bank-pb-research admin@example.com"}  # SEC requires a UA with contact
 
 BANKS = ["JPM", "BAC", "WFC", "C", "USB", "PNC", "TFC", "KEY", "FITB",
          "MTB", "RF", "HBAN", "CMA", "ZION", "BK", "STT"]
@@ -30,33 +33,53 @@ def quarterly_prices(tickers, start):
     return q("Close"), q("Adj Close")  # Close -> P/B, Adj Close -> total return
 
 
-def yahoo_bvps(tickers):
-    rows = []
+def _sec_series(facts, tag, unit):
+    """Quarter-end instant values for a us-gaap tag, latest filing wins."""
+    items = facts["facts"].get("us-gaap", {}).get(tag, {}).get("units", {}).get(unit, [])
+    df = pd.DataFrame([i for i in items if i.get("form", "").startswith(("10-Q", "10-K"))])
+    if df.empty:
+        return pd.Series(dtype=float)
+    df["q"] = pd.to_datetime(df["end"]) + pd.offsets.QuarterEnd(0)
+    return df.sort_values("filed").groupby("q")["val"].last().astype(float)
+
+
+def sec_bvps(tickers):
+    cik = {v["ticker"]: v["cik_str"] for v in
+           requests.get("https://www.sec.gov/files/company_tickers.json",
+                        headers=SEC_UA, timeout=30).json().values()}
+    out = {}
     for t in tickers:
-        bs = yf.Ticker(t).quarterly_balance_sheet
-        if bs is None or bs.empty:
+        if t not in cik:
+            print(f"skip {t}: no CIK")
             continue
-        eq = bs.loc["Stockholders Equity"] if "Stockholders Equity" in bs.index else None
-        sh = bs.loc["Ordinary Shares Number"] if "Ordinary Shares Number" in bs.index else None
-        if eq is None or sh is None:
-            continue
-        for d, v in (eq / sh).dropna().items():
-            rows.append((t, pd.Timestamp(d), v))
-    return pd.DataFrame(rows, columns=["ticker", "date", "bvps"])
+        facts = requests.get(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik[t]:010d}.json",
+                             headers=SEC_UA, timeout=60).json()
+        eq = _sec_series(facts, "StockholdersEquity", "USD")
+        pref = _sec_series(facts, "PreferredStockValue", "USD").reindex(eq.index).fillna(0)
+        sh = _sec_series(facts, "CommonStockSharesOutstanding", "shares")
+        bv = ((eq - pref) / sh).dropna()
+        # Restate to Yahoo's split-adjusted basis: divide by every split after the date.
+        splits = yf.Ticker(t).splits
+        if splits is not None and len(splits):
+            splits.index = splits.index.tz_localize(None)
+            adj = pd.Series([splits[splits.index > d].prod() for d in bv.index], bv.index)
+            bv = bv / adj
+        out[t] = bv[bv > 0]
+    return pd.DataFrame(out)
 
 
 def load_bvps(tickers, csv_path):
-    bv = yahoo_bvps(tickers)
+    bv = sec_bvps(tickers)
     if csv_path:
         ext = pd.read_csv(csv_path, parse_dates=["date"])
-        bv = pd.concat([ext, bv]).drop_duplicates(["ticker", "date"], keep="first")
-    bv["q"] = bv["date"] + pd.offsets.QuarterEnd(0)
-    return bv.pivot_table(index="q", columns="ticker", values="bvps", aggfunc="last")
+        ext["q"] = ext["date"] + pd.offsets.QuarterEnd(0)
+        bv = ext.pivot_table(index="q", columns="ticker", values="bvps", aggfunc="last").combine_first(bv)
+    return bv
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start", default="1996-01-01")
+    ap.add_argument("--start", default="2009-01-01")
     ap.add_argument("--bv-csv", help="historical BVPS: ticker,date,bvps")
     ap.add_argument("--horizon", type=int, default=4, help="forward return horizon, quarters")
     ap.add_argument("--out", default="bank_pb_vs_returns.png")
